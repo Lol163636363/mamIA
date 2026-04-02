@@ -1,13 +1,13 @@
 plugins {
     id("com.android.application")
     id("kotlin-android")
-    id("dev.flutter.flutter-gradle-plugin") version "1.0.0"
+    id("dev.flutter.flutter-gradle-plugin") // Plus de version ici
 }
 
 android {
     namespace = "com.example.mamai"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = "27.0.12077973"   // ← version requise par tous les plugins
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
