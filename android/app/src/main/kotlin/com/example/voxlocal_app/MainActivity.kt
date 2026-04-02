@@ -1,4 +1,4 @@
-package com.example.voxlocal_app
+package com.example.mamai
 
 import io.flutter.embedding.android.FlutterActivity
 
