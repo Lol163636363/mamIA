@@ -77,6 +77,11 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   // ── Init STT + démarrage de la boucle wake word ──────────────────────────
   Future<void> _initAndListen() async {
+    var status = await Permission.microphone.status;
+    if (status.isDenied) {
+      await Permission.microphone.request();
+    }
+    //──────────────────────────────────────────────────────────────────────────────
     final ok = await _stt.initialize(
       onError: (e) {
         debugPrint('STT error: $e');
