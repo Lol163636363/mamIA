@@ -109,7 +109,7 @@ workflows:
     publishing:
       email:
         recipients:
-          - dev@example.com
+          - lonycadu1@gmail.com
         notify:
           success: false
           failure: true
