@@ -64,7 +64,7 @@ workflows:
     publishing:
       email:
         recipients:
-          - dev@example.com       # ← remplace par ton adresse
+          - lonycadu1@gmail.com     # ← remplace par ton adresse
         notify:
           success: true
           failure: true
@@ -109,7 +109,7 @@ workflows:
     publishing:
       email:
         recipients:
-          - lonycadu1@gmail.com
+          - lonycadu1@gmail.com 
         notify:
           success: false
           failure: true
