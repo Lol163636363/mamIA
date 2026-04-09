@@ -1,6 +1,8 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:speech_to_text/speech_to_text.dart';
+import 'package:vosk_flutter/vosk_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'chat_page.dart';
 
@@ -13,10 +15,15 @@ class SetupPage extends StatefulWidget {
 
 class _SetupPageState extends State<SetupPage> with TickerProviderStateMixin {
   final TextEditingController _controller = TextEditingController();
-  final SpeechToText _stt = SpeechToText();
+
+  // Vosk variables
+  final VoskFlutter _vosk = VoskFlutter.instance;
+  Model? _model;
+  Recognizer? _recognizer;
+  SpeechService? _speechService;
 
   bool _isRecording = false;
-  bool _sttReady = false;
+  bool _voskReady = false;
   String _preview = '';
   String? _error;
 
@@ -42,48 +49,65 @@ class _SetupPageState extends State<SetupPage> with TickerProviderStateMixin {
     _pulseAnim = Tween(begin: 1.0, end: 1.15).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
-    _initStt();
+    _initVosk();
   }
 
-  Future<void> _initStt() async {
-    final status = await Permission.microphone.request();
-    if (!status.isGranted) return;
-    final ok = await _stt.initialize();
-    setState(() => _sttReady = ok);
+  Future<void> _initVosk() async {
+    try {
+      final status = await Permission.microphone.request();
+      if (!status.isGranted) return;
+
+      // Charger le modèle pour la config
+      final path = await _vosk.modelPath('assets/models/vosk-model-small-fr');
+      _model = await _vosk.createModel(path);
+      _recognizer = await _vosk.createRecognizer(model: _model!, sampleRate: 16000);
+      _speechService = await _vosk.initSpeechService(_recognizer!);
+
+      _speechService!.onPartial().listen((partialJson) {
+        if (_isRecording) {
+          setState(() => _preview = jsonDecode(partialJson)['partial'] ?? '');
+        }
+      });
+
+      _speechService!.onResult().listen((resultJson) {
+        if (_isRecording) {
+          final result = jsonDecode(resultJson)['text'] ?? '';
+          if (result.isNotEmpty) {
+            setState(() {
+              _isRecording = false;
+              _controller.text = result;
+              _preview = '';
+            });
+            _speechService!.stop();
+          }
+        }
+      });
+
+      setState(() => _voskReady = true);
+    } catch (e) {
+      debugPrint("Vosk Setup Error: $e");
+      setState(() => _error = "Erreur d'initialisation vocale.");
+    }
   }
 
-  // Enregistre le mot-clé dit à voix haute (pour vérifier la prononciation)
+  // Enregistre le mot-clé dit à voix haute
   Future<void> _recordWakeWord() async {
     if (_isRecording) {
-      await _stt.stop();
-      setState(() => _isRecording = false);
-      if (_preview.isNotEmpty) {
-        _controller.text = _preview;
-      }
+      await _speechService?.stop();
+      setState(() {
+        _isRecording = false;
+        if (_preview.isNotEmpty) _controller.text = _preview;
+      });
       return;
     }
 
     setState(() {
       _isRecording = true;
       _preview = '';
+      _error = null;
     });
 
-    await _stt.listen(
-      localeId: 'fr_FR',
-      listenFor: const Duration(seconds: 5),
-      pauseFor: const Duration(seconds: 2),
-      partialResults: true,
-      onResult: (result) {
-        setState(() => _preview = result.recognizedWords);
-        if (result.finalResult && result.recognizedWords.isNotEmpty) {
-          _stt.stop();
-          setState(() {
-            _isRecording = false;
-            _controller.text = result.recognizedWords;
-          });
-        }
-      },
-    );
+    await _speechService?.start();
   }
 
   Future<void> _save() async {
@@ -92,10 +116,9 @@ class _SetupPageState extends State<SetupPage> with TickerProviderStateMixin {
       setState(() => _error = 'Entrez un mot-clé.');
       return;
     }
-    if (word.split(' ').length > 4) {
-      setState(() => _error = 'Maximum 4 mots pour la détection.');
-      return;
-    }
+
+    // Fermer proprement Vosk avant de changer de page
+    await _speechService?.stop();
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('wake_word', word);
@@ -110,7 +133,9 @@ class _SetupPageState extends State<SetupPage> with TickerProviderStateMixin {
   void dispose() {
     _pulseController.dispose();
     _controller.dispose();
-    _stt.cancel();
+    _speechService?.dispose();
+    _recognizer?.dispose();
+    _model?.dispose();
     super.dispose();
   }
 
@@ -243,7 +268,7 @@ class _SetupPageState extends State<SetupPage> with TickerProviderStateMixin {
                   const SizedBox(width: 10),
                   // Bouton micro pour dire le mot-clé
                   GestureDetector(
-                    onTap: _sttReady ? _recordWakeWord : null,
+                    onTap: _voskReady ? _recordWakeWord : null,
                     child: AnimatedBuilder(
                       animation: _pulseAnim,
                       builder: (_, child) => Transform.scale(
@@ -275,7 +300,7 @@ class _SetupPageState extends State<SetupPage> with TickerProviderStateMixin {
                 ],
               ),
 
-              // Preview STT en direct
+              // Preview Vosk en direct
               if (_isRecording && _preview.isNotEmpty) ...[
                 const SizedBox(height: 8),
                 Text(

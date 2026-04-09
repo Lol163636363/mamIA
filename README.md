@@ -33,8 +33,8 @@ mamAI est un assistant vocal personnel qui tourne **entièrement en local**, san
 ```
 ┌─────────────┐     mot-clé     ┌──────────────┐     HTTP/JSON     ┌─────────────────┐
 │   🎙️  Voix  │ ─────────────► │  Flutter App │ ────────────────► │  FastAPI + LLM  │
-│  (Android)  │                 │  speech_to_  │                   │  (local Python) │
-│             │ ◄───────────── │  text + STT  │ ◄──────────────── │  Piper TTS      │
+│  (Android)  │                 │  Vosk (local)│                   │  (local Python) │
+│             │ ◄───────────── │  audio WAV   │ ◄──────────────── │  Piper TTS      │
 └─────────────┘    audio WAV    └──────────────┘    audio bytes    └─────────────────┘
 ```
 
@@ -44,8 +44,8 @@ mamAI est un assistant vocal personnel qui tourne **entièrement en local**, san
 
 | | Fonctionnalité | Détail |
 |---|---|---|
-| 🎙️ | **Mot-clé personnalisé** | Choisissez votre propre wake word — "Hey mamAI", "Jarvis", n'importe quoi |
-| 🔁 | **Écoute en boucle** | Détection continue du mot-clé sans appui de bouton |
+| 🎙️ | **Mot-clé personnalisé** | Choisissez votre propre wake word — "Hey mamAI", "Jarvis" |
+| 🔁 | **Écoute continue (Vosk)** | Détection locale sans coupure (fini la limite des 10s) |
 | 🤖 | **IA 100 % locale** | Backend FastAPI, aucun appel vers OpenAI ou équivalent |
 | 🔊 | **Synthèse vocale** | Réponses lues avec Piper TTS, qualité naturelle |
 | 💾 | **Persistance** | Mot-clé et historique sauvegardés localement |
@@ -58,7 +58,7 @@ mamAI est un assistant vocal personnel qui tourne **entièrement en local**, san
 ```
 ┌─────────────────────────────────────────────────┐
 │  MOBILE (Flutter / Dart)                        │
-│  ├── speech_to_text  ^7.1.0   reconnaissance    │
+│  ├── vosk_flutter    ^0.2.1   reconnaissance    │
 │  ├── audioplayers    ^5.2.1   lecture TTS       │
 │  ├── http            ^1.2.0   appels backend    │
 │  ├── permission_handler ^11   micro runtime     │
