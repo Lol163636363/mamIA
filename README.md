@@ -75,6 +75,7 @@ mamAI est un assistant vocal personnel qui tourne **entièrement en local**, san
 └─────────────────────────────────────────────────┘
 ```
 
+
 ---
 
 ## Installation
