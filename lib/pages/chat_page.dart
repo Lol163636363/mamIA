@@ -5,13 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:speech_to_text/speech_to_text.dart';
+import 'package:vosk_flutter/vosk_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'setup_page.dart';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const String _apiUrl = 'https://TON-TUNNEL.trycloudflare.com/chat';
-//                      ↑ remplace par ton URL Cloudflare
+const String _modelPath = 'assets/models/vosk-model-small-fr';
 
 // ─── Modèle message ───────────────────────────────────────────────────────────
 enum Sender { user, ai }
@@ -21,6 +21,7 @@ enum ListenState {
   wakeWord,   // mot-clé détecté, en cours d'écoute de la commande
   loading,    // requête en cours
   playing,    // lecture audio
+  initializing, // chargement du modèle Vosk
 }
 
 class ChatMessage {
@@ -41,15 +42,17 @@ class ChatPage extends StatefulWidget {
 class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   final List<ChatMessage> _messages = [];
   final AudioPlayer _player = AudioPlayer();
-  final SpeechToText _stt = SpeechToText();
   final ScrollController _scrollController = ScrollController();
 
-  ListenState _state = ListenState.idle;
-  String _liveTranscript = '';
-  bool _sttReady = false;
+  // Vosk variables
+  final VoskFlutter _vosk = VoskFlutter.instance;
+  Model? _model;
+  Recognizer? _recognizer;
+  SpeechService? _speechService;
 
-  // Timer pour relancer l'écoute du wake word après un cycle complet
-  Timer? _restartTimer;
+  ListenState _state = ListenState.initializing;
+  String _liveTranscript = '';
+  String? _errorMessage;
 
   late AnimationController _orb;
   late Animation<double> _orbScale;
@@ -69,101 +72,91 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _player.onPlayerComplete.listen((_) {
       if (mounted) {
         setState(() => _state = ListenState.idle);
-        _startWakeWordLoop();
+        _resumeListening();
       }
     });
 
-    _initAndListen();
+    _initVosk();
   }
 
-  // ── Init STT + démarrage de la boucle wake word ──────────────────────────
-  Future<void> _initAndListen() async {
-    var status = await Permission.microphone.status;
-    if (status.isDenied) {
-      await Permission.microphone.request();
+  // ── Init Vosk Model & Service ──────────────────────────────────────────────
+  Future<void> _initVosk() async {
+    try {
+      var status = await Permission.microphone.status;
+      if (status.isDenied) {
+        status = await Permission.microphone.request();
+        if (!status.isGranted) {
+          setState(() {
+            _state = ListenState.idle;
+            _errorMessage = "Microphone non autorisé";
+          });
+          return;
+        }
+      }
+
+      // 1. Charger le modèle depuis les assets
+      final path = await _vosk.modelPath(_modelPath);
+      _model = await _vosk.createModel(path);
+
+      // 2. Créer le reconnaisseur
+      _recognizer = await _vosk.createRecognizer(
+        model: _model!,
+        sampleRate: 16000,
+      );
+
+      // 3. Initialiser le service de parole
+      _speechService = await _vosk.initSpeechService(_recognizer!);
+
+      // Flux de résultats partiels (pendant qu'on parle)
+      _speechService!.onPartial().listen((partialJson) {
+        final partial = jsonDecode(partialJson)['partial'] ?? '';
+        if (_state == ListenState.idle) {
+          if (partial.toLowerCase().contains(widget.wakeWord.toLowerCase())) {
+            _onWakeWordDetected();
+          }
+        } else if (_state == ListenState.wakeWord) {
+          setState(() => _liveTranscript = partial);
+        }
+      });
+
+      // Flux de résultats finaux (après un silence)
+      _speechService!.onResult().listen((resultJson) {
+        final result = jsonDecode(resultJson)['text'] ?? '';
+        if (_state == ListenState.wakeWord && result.isNotEmpty) {
+          _sendMessage(result);
+        }
+      });
+
+      await _speechService!.start();
+      setState(() => _state = ListenState.idle);
+
+    } catch (e) {
+      debugPrint('Vosk Init Error: $e');
+      setState(() {
+        _state = ListenState.idle;
+        _errorMessage = "Erreur d'initialisation vocale.\nVérifiez que le modèle est bien dans assets.";
+      });
     }
-    //──────────────────────────────────────────────────────────────────────────────
-    final ok = await _stt.initialize(
-      onError: (e) {
-        debugPrint('STT error: $e');
-        // En cas d'erreur, on relance dans 1s
-        _restartTimer = Timer(const Duration(seconds: 1), _startWakeWordLoop);
-      },
-      onStatus: (s) {
-        debugPrint('STT status: $s');
-        if (s == 'notListening' && _state == ListenState.idle) {
-          // La session STT s'est arrêtée toute seule → relancer
-          _restartTimer =
-              Timer(const Duration(milliseconds: 300), _startWakeWordLoop);
-        }
-      },
-    );
-    setState(() => _sttReady = ok);
-    if (ok) _startWakeWordLoop();
   }
 
-  // ── Boucle d'écoute du mot-clé ────────────────────────────────────────────
-  //
-  // speech_to_text ne fait pas de détection de hot-word nativement,
-  // on utilise donc une session continue : on écoute en permanence et
-  // on regarde si le transcript contient le mot-clé.
-  //
-  void _startWakeWordLoop() {
-    if (!_sttReady) return;
-    if (_state != ListenState.idle) return;
-    if (_stt.isListening) return;
-
-    _stt.listen(
-      localeId: 'fr_FR',
-      listenFor: const Duration(seconds: 10), // session max
-      pauseFor: const Duration(seconds: 10),  // pas de coupure sur silence
-      partialResults: true,
-      onResult: (result) {
-        final words = result.recognizedWords.toLowerCase();
-
-        // Mot-clé détecté ?
-        if (words.contains(widget.wakeWord.toLowerCase())) {
-          _stt.stop();
-          _onWakeWordDetected();
-        }
-      },
-    );
-  }
-
-  // ── Mot-clé détecté → écouter la commande ─────────────────────────────────
   void _onWakeWordDetected() {
     if (_state != ListenState.idle) return;
     setState(() {
       _state = ListenState.wakeWord;
       _liveTranscript = '';
     });
+    // On ne stoppe pas le service, on change juste d'état interne
+  }
 
-    // Petit délai pour que l'utilisateur sache que mamAI l'écoute
-    Future.delayed(const Duration(milliseconds: 200), () {
-      _stt.listen(
-        localeId: 'fr_FR',
-        listenFor: const Duration(seconds: 15),
-        pauseFor: const Duration(seconds: 2), // silence → fin de commande
-        partialResults: true,
-        onResult: (result) {
-          setState(() => _liveTranscript = result.recognizedWords);
-
-          if (result.finalResult && result.recognizedWords.isNotEmpty) {
-            _stt.stop();
-            _sendMessage(result.recognizedWords);
-          }
-        },
-      );
-    });
-
-    // Timeout de sécurité : si aucune commande en 15s → retour idle
-    _restartTimer = Timer(const Duration(seconds: 16), () {
-      if (_state == ListenState.wakeWord) {
-        _stt.stop();
-        setState(() => _state = ListenState.idle);
-        _startWakeWordLoop();
-      }
-    });
+  void _resumeListening() async {
+    if (_speechService != null) {
+      // Si on était en pause pendant l'audio, on reprend
+      // Mais ici avec Vosk on peut rester en start() et filtrer par état
+      setState(() {
+        _state = ListenState.idle;
+        _liveTranscript = '';
+      });
+    }
   }
 
   // ── Envoi à l'API mamAI ───────────────────────────────────────────────────
@@ -171,7 +164,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     final trimmed = texte.trim();
     if (trimmed.isEmpty) {
       setState(() => _state = ListenState.idle);
-      _startWakeWordLoop();
       return;
     }
 
@@ -202,16 +194,14 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         _scrollToBottom();
 
         await _player.play(BytesSource(audioBytes));
-        // onPlayerComplete relance _startWakeWordLoop
+        // onPlayerComplete relance l'écoute
       } else {
         _addError('Erreur serveur ${response.statusCode}');
         setState(() => _state = ListenState.idle);
-        _startWakeWordLoop();
       }
     } catch (e) {
       _addError('Connexion impossible');
       setState(() => _state = ListenState.idle);
-      _startWakeWordLoop();
     }
   }
 
@@ -233,8 +223,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   // ── Changer le mot-clé ────────────────────────────────────────────────────
   Future<void> _resetWakeWord() async {
-    await _stt.cancel();
-    _restartTimer?.cancel();
+    await _speechService?.stop();
+    _speechService = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('wake_word');
     if (!mounted) return;
@@ -245,10 +235,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
-    _stt.cancel();
+    _speechService?.stop();
+    _speechService?.dispose();
+    _recognizer?.dispose();
+    _model?.dispose();
     _player.dispose();
     _orb.dispose();
-    _restartTimer?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
@@ -283,17 +275,29 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       ),
       body: Column(
         children: [
+          if (_errorMessage != null)
+            Container(
+              color: Colors.redAccent.withOpacity(0.1),
+              padding: const EdgeInsets.all(8),
+              width: double.infinity,
+              child: Text(_errorMessage!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+            ),
+
           // ── Liste messages ───────────────────────────────────────────
           Expanded(
-            child: _messages.isEmpty
-                ? _EmptyState(wakeWord: widget.wakeWord)
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.all(16),
-                    itemCount: _messages.length,
-                    itemBuilder: (_, i) =>
-                        _MessageBubble(msg: _messages[i]),
-                  ),
+            child: _state == ListenState.initializing
+                ? const Center(child: CircularProgressIndicator())
+                : _messages.isEmpty
+                    ? _EmptyState(wakeWord: widget.wakeWord)
+                    : ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.all(16),
+                        itemCount: _messages.length,
+                        itemBuilder: (_, i) =>
+                            _MessageBubble(msg: _messages[i]),
+                      ),
           ),
 
           // ── Indicateur d'état ────────────────────────────────────────
@@ -309,7 +313,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   }
 }
 
-// ─── Widget état vide ─────────────────────────────────────────────────────────
+// ─── Widget état vide (inchangé) ──────────────────────────────────────────────
 class _EmptyState extends StatelessWidget {
   final String wakeWord;
   const _EmptyState({required this.wakeWord});
@@ -343,7 +347,7 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-// ─── Indicateur d'état bas d'écran ────────────────────────────────────────────
+// ─── Indicateur d'état bas d'écran (mis à jour) ───────────────────────────────
 class _StateIndicator extends StatelessWidget {
   final ListenState state;
   final String wakeWord;
@@ -433,6 +437,8 @@ class _StateIndicator extends StatelessWidget {
 
   Color _orbColor() {
     switch (state) {
+      case ListenState.initializing:
+        return Colors.white24;
       case ListenState.idle:
         return const Color(0xFF2A2A4A);
       case ListenState.wakeWord:
@@ -446,6 +452,8 @@ class _StateIndicator extends StatelessWidget {
 
   IconData _orbIcon() {
     switch (state) {
+      case ListenState.initializing:
+        return Icons.hourglass_top;
       case ListenState.idle:
         return Icons.hearing;
       case ListenState.wakeWord:
@@ -459,6 +467,8 @@ class _StateIndicator extends StatelessWidget {
 
   String _stateLabel() {
     switch (state) {
+      case ListenState.initializing:
+        return 'CHARGEMENT DU MODÈLE…';
       case ListenState.idle:
         return 'EN ATTENTE DU MOT-CLÉ';
       case ListenState.wakeWord:
@@ -471,7 +481,7 @@ class _StateIndicator extends StatelessWidget {
   }
 }
 
-// ─── Bulle de message ─────────────────────────────────────────────────────────
+// ─── Bulle de message (inchangée) ─────────────────────────────────────────────
 class _MessageBubble extends StatelessWidget {
   final ChatMessage msg;
   const _MessageBubble({required this.msg});
