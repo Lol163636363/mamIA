@@ -10,11 +10,15 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  vosk_flutter: ^0.2.1
+  vosk_flutter:
+    git:
+      url: https://github.com/alphacep/vosk-flutter.git
   audioplayers: ^5.2.1
   http: ^1.2.0
-  permission_handler: ^11.3.0
+  permission_handler: ^11.3.1
   shared_preferences: ^2.2.3
+  path: ^1.9.0
+  path_provider: ^2.1.2
 
 dev_dependencies:
   flutter_test:
@@ -25,3 +29,8 @@ flutter:
   uses-material-design: true
   assets:
     - assets/models/vosk-model-small-fr/
+    - assets/models/vosk-model-small-fr/am/
+    - assets/models/vosk-model-small-fr/conf/
+    - assets/models/vosk-model-small-fr/graph/
+    - assets/models/vosk-model-small-fr/graph/phones/
+    - assets/models/vosk-model-small-fr/ivector/

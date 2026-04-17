@@ -9,19 +9,17 @@ import 'package:vosk_flutter/vosk_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'setup_page.dart';
 
-// ─── Config ───────────────────────────────────────────────────────────────────
 const String _apiUrl = 'https://TON-TUNNEL.trycloudflare.com/chat';
-const String _modelPath = 'assets/models/vosk-model-small-fr';
 
-// ─── Modèle message ───────────────────────────────────────────────────────────
 enum Sender { user, ai }
 
 enum ListenState {
-  idle,       // en attente du mot-clé
-  wakeWord,   // mot-clé détecté, en cours d'écoute de la commande
-  loading,    // requête en cours
-  playing,    // lecture audio
-  initializing, // chargement du modèle Vosk
+  idle,         // En attente du mot-clé
+  wakeWord,     // Mot-clé détecté, écoute de la commande
+  loading,      // Traitement IA
+  playing,      // L'IA parle
+  initializing, // Chargement Vosk
+  error         // Erreur fatale
 }
 
 class ChatMessage {
@@ -30,7 +28,6 @@ class ChatMessage {
   ChatMessage({required this.text, required this.sender});
 }
 
-// ─── Page Chat ────────────────────────────────────────────────────────────────
 class ChatPage extends StatefulWidget {
   final String wakeWord;
   const ChatPage({super.key, required this.wakeWord});
@@ -44,14 +41,13 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   final AudioPlayer _player = AudioPlayer();
   final ScrollController _scrollController = ScrollController();
 
-  // Vosk variables
-  final VoskFlutter _vosk = VoskFlutter.instance;
+  final VoskFlutterPlugin _vosk = VoskFlutterPlugin.instance();
   Model? _model;
   Recognizer? _recognizer;
   SpeechService? _speechService;
 
   ListenState _state = ListenState.initializing;
-  String _liveTranscript = '';
+  String _liveTranscript = 'Initialisation...';
   String? _errorMessage;
 
   late AnimationController _orb;
@@ -60,117 +56,91 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-
     _orb = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1200),
+      duration: const Duration(milliseconds: 1000),
     )..repeat(reverse: true);
-    _orbScale = Tween(begin: 0.95, end: 1.05).animate(
+    _orbScale = Tween(begin: 0.9, end: 1.1).animate(
       CurvedAnimation(parent: _orb, curve: Curves.easeInOut),
     );
 
     _player.onPlayerComplete.listen((_) {
       if (mounted) {
-        setState(() => _state = ListenState.idle);
-        _resumeListening();
+        _startListening();
       }
     });
 
     _initVosk();
   }
 
-  // ── Init Vosk Model & Service ──────────────────────────────────────────────
   Future<void> _initVosk() async {
     try {
-      var status = await Permission.microphone.status;
-      if (status.isDenied) {
-        status = await Permission.microphone.request();
-        if (!status.isGranted) {
-          setState(() {
-            _state = ListenState.idle;
-            _errorMessage = "Microphone non autorisé";
-          });
-          return;
-        }
+      final status = await Permission.microphone.request();
+      if (!status.isGranted) {
+        setState(() {
+          _state = ListenState.error;
+          _errorMessage = "Permission micro refusée";
+        });
+        return;
       }
 
-      // 1. Charger le modèle depuis les assets
-      final path = await _vosk.modelPath(_modelPath);
-      _model = await _vosk.createModel(path);
+      final modelLoader = ModelLoader();
+      final modelPath = await modelLoader.loadFromAssets('assets/models/vosk-model-small-fr');
 
-      // 2. Créer le reconnaisseur
-      _recognizer = await _vosk.createRecognizer(
-        model: _model!,
-        sampleRate: 16000,
-      );
-
-      // 3. Initialiser le service de parole
+      _model = await _vosk.createModel(modelPath);
+      _recognizer = await _vosk.createRecognizer(model: _model!, sampleRate: 16000);
       _speechService = await _vosk.initSpeechService(_recognizer!);
 
-      // Flux de résultats partiels (pendant qu'on parle)
       _speechService!.onPartial().listen((partialJson) {
         final partial = jsonDecode(partialJson)['partial'] ?? '';
+        if (partial.isEmpty) return;
+
+        setState(() => _liveTranscript = partial);
+
         if (_state == ListenState.idle) {
           if (partial.toLowerCase().contains(widget.wakeWord.toLowerCase())) {
-            _onWakeWordDetected();
+            setState(() {
+              _state = ListenState.wakeWord;
+              _liveTranscript = "J'écoute...";
+            });
           }
-        } else if (_state == ListenState.wakeWord) {
-          setState(() => _liveTranscript = partial);
         }
       });
 
-      // Flux de résultats finaux (après un silence)
       _speechService!.onResult().listen((resultJson) {
         final result = jsonDecode(resultJson)['text'] ?? '';
         if (_state == ListenState.wakeWord && result.isNotEmpty) {
           _sendMessage(result);
+        } else if (_state == ListenState.wakeWord && result.isEmpty) {
+          // Si on attendait une commande mais qu'on n'a rien reçu, on repasse en idle
+          setState(() => _state = ListenState.idle);
         }
       });
 
-      await _speechService!.start();
-      setState(() => _state = ListenState.idle);
-
+      _startListening();
     } catch (e) {
-      debugPrint('Vosk Init Error: $e');
       setState(() {
-        _state = ListenState.idle;
-        _errorMessage = "Erreur d'initialisation vocale.\nVérifiez que le modèle est bien dans assets.";
+        _state = ListenState.error;
+        _errorMessage = "Erreur Vosk: $e";
       });
     }
   }
 
-  void _onWakeWordDetected() {
-    if (_state != ListenState.idle) return;
+  void _startListening() {
+    _speechService?.start();
     setState(() {
-      _state = ListenState.wakeWord;
-      _liveTranscript = '';
+      _state = ListenState.idle;
+      _liveTranscript = "Dites '${widget.wakeWord}'";
     });
-    // On ne stoppe pas le service, on change juste d'état interne
   }
 
-  void _resumeListening() async {
-    if (_speechService != null) {
-      // Si on était en pause pendant l'audio, on reprend
-      // Mais ici avec Vosk on peut rester en start() et filtrer par état
-      setState(() {
-        _state = ListenState.idle;
-        _liveTranscript = '';
-      });
-    }
-  }
-
-  // ── Envoi à l'API mamAI ───────────────────────────────────────────────────
   Future<void> _sendMessage(String texte) async {
-    final trimmed = texte.trim();
-    if (trimmed.isEmpty) {
-      setState(() => _state = ListenState.idle);
-      return;
-    }
+    await _speechService?.stop(); // On arrête d'écouter pendant que l'IA réfléchit/parle
 
     setState(() {
       _state = ListenState.loading;
-      _liveTranscript = '';
-      _messages.add(ChatMessage(text: trimmed, sender: Sender.user));
+      _liveTranscript = 'Analyse en cours...';
+      _messages.add(ChatMessage(text: texte, sender: Sender.user));
     });
     _scrollToBottom();
 
@@ -178,39 +148,30 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       final response = await http.post(
         Uri.parse(_apiUrl),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'texte': trimmed}),
-      );
+        body: jsonEncode({'texte': texte}),
+      ).timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
-        final iaText = Uri.decodeComponent(
-          response.headers['x-ia-reponse'] ?? '...',
-        );
+        final iaText = Uri.decodeComponent(response.headers['x-ia-reponse'] ?? '...');
         final Uint8List audioBytes = response.bodyBytes;
 
         setState(() {
           _state = ListenState.playing;
+          _liveTranscript = 'mamIA parle...';
           _messages.add(ChatMessage(text: iaText, sender: Sender.ai));
         });
         _scrollToBottom();
-
         await _player.play(BytesSource(audioBytes));
-        // onPlayerComplete relance l'écoute
       } else {
-        _addError('Erreur serveur ${response.statusCode}');
-        setState(() => _state = ListenState.idle);
+        _startListening();
       }
     } catch (e) {
-      _addError('Connexion impossible');
-      setState(() => _state = ListenState.idle);
+      _startListening();
     }
   }
 
-  void _addError(String msg) => setState(() {
-        _messages.add(ChatMessage(text: '⚠️ $msg', sender: Sender.ai));
-      });
-
   void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    Future.delayed(const Duration(milliseconds: 100), () {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
@@ -221,303 +182,113 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     });
   }
 
-  // ── Changer le mot-clé ────────────────────────────────────────────────────
-  Future<void> _resetWakeWord() async {
+  Future<void> _reset() async {
     await _speechService?.stop();
-    _speechService = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('wake_word');
     if (!mounted) return;
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const SetupPage()),
-    );
+    Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const SetupPage()));
   }
 
   @override
   void dispose() {
     _speechService?.stop();
-    _speechService?.dispose();
-    _recognizer?.dispose();
-    _model?.dispose();
     _player.dispose();
     _orb.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
-  // ── UI ─────────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0A0A0F),
+        title: const Text('mamIA', style: TextStyle(letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.transparent,
         elevation: 0,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('mamAI',
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.w700)),
-            Text(
-              'mot-clé : "${widget.wakeWord}"',
-              style: const TextStyle(
-                  fontSize: 11, color: Colors.white38),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.tune, color: Colors.white38),
-            tooltip: 'Changer le mot-clé',
-            onPressed: _resetWakeWord,
-          ),
-        ],
+        actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: _reset)],
       ),
       body: Column(
         children: [
-          if (_errorMessage != null)
-            Container(
-              color: Colors.redAccent.withOpacity(0.1),
-              padding: const EdgeInsets.all(8),
-              width: double.infinity,
-              child: Text(_errorMessage!,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
-            ),
-
-          // ── Liste messages ───────────────────────────────────────────
           Expanded(
-            child: _state == ListenState.initializing
-                ? const Center(child: CircularProgressIndicator())
-                : _messages.isEmpty
-                    ? _EmptyState(wakeWord: widget.wakeWord)
-                    : ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.all(16),
-                        itemCount: _messages.length,
-                        itemBuilder: (_, i) =>
-                            _MessageBubble(msg: _messages[i]),
-                      ),
-          ),
-
-          // ── Indicateur d'état ────────────────────────────────────────
-          _StateIndicator(
-            state: _state,
-            wakeWord: widget.wakeWord,
-            liveTranscript: _liveTranscript,
-            orbAnim: _orbScale,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─── Widget état vide (inchangé) ──────────────────────────────────────────────
-class _EmptyState extends StatelessWidget {
-  final String wakeWord;
-  const _EmptyState({required this.wakeWord});
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Text('🎙️',
-              style: TextStyle(fontSize: 48)),
-          const SizedBox(height: 16),
-          Text(
-            'Dites\n"$wakeWord"',
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.w600,
-              color: Colors.white70,
+            child: ListView.builder(
+              controller: _scrollController,
+              padding: const EdgeInsets.all(20),
+              itemCount: _messages.length,
+              itemBuilder: (_, i) => _MessageBubble(msg: _messages[i]),
             ),
           ),
-          const SizedBox(height: 8),
-          const Text(
-            'pour commencer',
-            style: TextStyle(color: Colors.white38, fontSize: 14),
-          ),
+          _StatusArea(state: _state, transcript: _liveTranscript, anim: _orbScale, error: _errorMessage),
         ],
       ),
     );
   }
 }
 
-// ─── Indicateur d'état bas d'écran (mis à jour) ───────────────────────────────
-class _StateIndicator extends StatelessWidget {
+class _StatusArea extends StatelessWidget {
   final ListenState state;
-  final String wakeWord;
-  final String liveTranscript;
-  final Animation<double> orbAnim;
+  final String transcript;
+  final String? error;
+  final Animation<double> anim;
 
-  const _StateIndicator({
-    required this.state,
-    required this.wakeWord,
-    required this.liveTranscript,
-    required this.orbAnim,
-  });
+  const _StatusArea({required this.state, required this.transcript, this.error, required this.anim});
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: Container(
-        width: double.infinity,
-        padding:
-            const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-        decoration: const BoxDecoration(
-          color: Color(0xFF0E0E18),
-          border: Border(
-              top: BorderSide(color: Color(0xFF1E1E2E), width: 1)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Orbe animé
-            AnimatedBuilder(
-              animation: orbAnim,
-              builder: (_, __) => Transform.scale(
-                scale: state == ListenState.wakeWord ||
-                        state == ListenState.playing
-                    ? orbAnim.value
-                    : 1.0,
-                child: Container(
-                  width: 56,
-                  height: 56,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _orbColor(),
-                    boxShadow: [
-                      BoxShadow(
-                        color: _orbColor().withOpacity(0.4),
-                        blurRadius:
-                            state == ListenState.idle ? 8 : 20,
-                        spreadRadius:
-                            state == ListenState.idle ? 0 : 4,
-                      )
-                    ],
-                  ),
-                  child: Icon(_orbIcon(),
-                      color: Colors.white, size: 24),
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
+    Color color = Colors.blueGrey;
+    if (state == ListenState.wakeWord) color = const Color(0xFF00D4FF);
+    if (state == ListenState.playing) color = const Color(0xFF00FF94);
+    if (state == ListenState.error) color = Colors.redAccent;
 
-            // Texte d'état
-            Text(
-              _stateLabel(),
-              style: TextStyle(
-                fontSize: 13,
-                color: _orbColor(),
-                fontWeight: FontWeight.w600,
-                letterSpacing: 1.5,
-              ),
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 20),
+      decoration: const BoxDecoration(
+        color: Color(0xFF12121A),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+      ),
+      child: Column(
+        children: [
+          if (error != null) Text(error!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+          ScaleTransition(
+            scale: anim,
+            child: Container(
+              padding: const EdgeInsets.all(15),
+              decoration: BoxDecoration(shape: BoxShape.circle, color: color.withOpacity(0.2)),
+              child: Icon(state == ListenState.loading ? Icons.hourglass_empty : Icons.mic, color: color, size: 30),
             ),
-
-            // Transcript live
-            if (state == ListenState.wakeWord &&
-                liveTranscript.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(
-                liveTranscript,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: Colors.white60, fontSize: 13),
-              ),
-            ],
-          ],
-        ),
+          ),
+          const SizedBox(height: 15),
+          Text(
+            transcript,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: color.withOpacity(0.8), fontSize: 16, fontWeight: FontWeight.w500),
+          ),
+        ],
       ),
     );
   }
-
-  Color _orbColor() {
-    switch (state) {
-      case ListenState.initializing:
-        return Colors.white24;
-      case ListenState.idle:
-        return const Color(0xFF2A2A4A);
-      case ListenState.wakeWord:
-        return const Color(0xFF00D4FF);
-      case ListenState.loading:
-        return const Color(0xFF7B2FFF);
-      case ListenState.playing:
-        return const Color(0xFF00FF94);
-    }
-  }
-
-  IconData _orbIcon() {
-    switch (state) {
-      case ListenState.initializing:
-        return Icons.hourglass_top;
-      case ListenState.idle:
-        return Icons.hearing;
-      case ListenState.wakeWord:
-        return Icons.mic;
-      case ListenState.loading:
-        return Icons.hourglass_empty;
-      case ListenState.playing:
-        return Icons.volume_up;
-    }
-  }
-
-  String _stateLabel() {
-    switch (state) {
-      case ListenState.initializing:
-        return 'CHARGEMENT DU MODÈLE…';
-      case ListenState.idle:
-        return 'EN ATTENTE DU MOT-CLÉ';
-      case ListenState.wakeWord:
-        return 'JE VOUS ÉCOUTE…';
-      case ListenState.loading:
-        return 'RÉFLEXION…';
-      case ListenState.playing:
-        return 'RÉPONSE EN COURS';
-    }
-  }
 }
 
-// ─── Bulle de message (inchangée) ─────────────────────────────────────────────
 class _MessageBubble extends StatelessWidget {
   final ChatMessage msg;
   const _MessageBubble({required this.msg});
-
   @override
   Widget build(BuildContext context) {
-    final isUser = msg.sender == Sender.user;
+    bool isUser = msg.sender == Sender.user;
     return Align(
-      alignment:
-          isUser ? Alignment.centerRight : Alignment.centerLeft,
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 5),
-        padding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
-        constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.78),
+        margin: const EdgeInsets.symmetric(vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: isUser
-              ? const Color(0xFF1A3A5C)
-              : const Color(0xFF1A1A2E),
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(18),
-            topRight: const Radius.circular(18),
-            bottomLeft: Radius.circular(isUser ? 18 : 4),
-            bottomRight: Radius.circular(isUser ? 4 : 18),
-          ),
-          border: Border.all(
-            color: isUser
-                ? const Color(0xFF00D4FF).withOpacity(0.3)
-                : const Color(0xFF2A2A3A),
-            width: 1,
+          color: isUser ? const Color(0xFF2A2A4A) : const Color(0xFF1A1A2E),
+          borderRadius: BorderRadius.circular(20).copyWith(
+            bottomRight: isUser ? Radius.zero : const Radius.circular(20),
+            bottomLeft: isUser ? const Radius.circular(20) : Radius.zero,
           ),
         ),
-        child: Text(msg.text,
-            style: const TextStyle(
-                color: Colors.white, fontSize: 15, height: 1.4)),
+        child: Text(msg.text, style: const TextStyle(color: Colors.white, fontSize: 15)),
       ),
     );
   }
