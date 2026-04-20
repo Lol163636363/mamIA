@@ -1,5 +1,7 @@
 package com.example.mamai
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.Manifest
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
@@ -16,8 +18,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -50,6 +54,7 @@ class MainActivity : ComponentActivity(), RecognitionListener {
 
     private var speechService: SpeechService? = null
     private var model: Model? = null
+    private lateinit var prefs: SharedPreferences
     
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -60,14 +65,24 @@ class MainActivity : ComponentActivity(), RecognitionListener {
     private val backendUrl = "http://192.168.1.50:8000/chat" 
 
     private val _liveTranscript = mutableStateOf("Initialisation...")
+    private val _triggerWord = mutableStateOf("mamai")
     private val _messages = mutableStateListOf<Pair<String, Boolean>>() // Text to isUser
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        prefs = getSharedPreferences("mamai_prefs", Context.MODE_PRIVATE)
+        _triggerWord.value = prefs.getString("trigger_word", "mamai") ?: "mamai"
+
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                MainScreen()
+                var showSettings by remember { mutableStateOf(false) }
+                
+                if (showSettings) {
+                    SettingsScreen(onBack = { showSettings = false })
+                } else {
+                    MainScreen(onSettingsClick = { showSettings = true })
+                }
             }
         }
 
@@ -98,7 +113,7 @@ class MainActivity : ComponentActivity(), RecognitionListener {
         StorageService.unpack(this, "model-fr", "model",
             { model: Model ->
                 this.model = model
-                _liveTranscript.value = "Dites 'mamAI'"
+                _liveTranscript.value = "Dites '${_triggerWord.value}'"
                 startRecognition()
             },
             { e: IOException -> 
@@ -123,7 +138,7 @@ class MainActivity : ComponentActivity(), RecognitionListener {
         val text = extractText(hypothesis, "partial")
         if (text.isNotEmpty()) {
             _liveTranscript.value = text
-            if (text.lowercase().contains("mamai")) {
+            if (text.lowercase().contains(_triggerWord.value.lowercase())) {
                 _liveTranscript.value = "J'écoute..."
             }
         }
@@ -160,7 +175,7 @@ class MainActivity : ComponentActivity(), RecognitionListener {
                             
                             withContext(Dispatchers.Main) {
                                 _messages.add(responseHeader to false)
-                                _liveTranscript.value = "Dites 'mamAI'"
+                                _liveTranscript.value = "Dites '${_triggerWord.value}'"
                                 if (audioBytes != null) {
                                     playAudio(audioBytes)
                                 }
@@ -168,14 +183,14 @@ class MainActivity : ComponentActivity(), RecognitionListener {
                         } else {
                             withContext(Dispatchers.Main) {
                                 _messages.add("Erreur serveur: ${resp.code}" to false)
-                                _liveTranscript.value = "Dites 'mamAI'"
+                                _liveTranscript.value = "Dites '${_triggerWord.value}'"
                             }
                         }
                     }
                 }
             } catch (e: Exception) {
                 _messages.add("Erreur connexion: ${e.message}" to false)
-                _liveTranscript.value = "Dites 'mamAI'"
+                _liveTranscript.value = "Dites '${_triggerWord.value}'"
             }
         }
     }
@@ -206,14 +221,17 @@ class MainActivity : ComponentActivity(), RecognitionListener {
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
-    fun MainScreen() {
+    fun MainScreen(onSettingsClick: () -> Unit) {
         Scaffold(
             topBar = {
                 TopAppBar(
                     title = { Text("mamAI", fontWeight = FontWeight.Bold) },
                     actions = {
+                        IconButton(onClick = onSettingsClick) {
+                            Icon(Icons.Default.Settings, contentDescription = "Settings")
+                        }
                         IconButton(onClick = { _messages.clear() }) {
-                            Icon(Icons.Default.Refresh, contentDescription = null)
+                            Icon(Icons.Default.Refresh, contentDescription = "Clear")
                         }
                     }
                 )
@@ -227,6 +245,63 @@ class MainActivity : ComponentActivity(), RecognitionListener {
                     }
                 }
                 StatusArea()
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    fun SettingsScreen(onBack: () -> Unit) {
+        var textState by remember { mutableStateOf(_triggerWord.value) }
+
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Paramètres", fontWeight = FontWeight.Bold) },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                )
+            },
+            containerColor = Color(0xFF0A0A0F)
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .padding(padding)
+                    .fillMaxSize()
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "Déclencheur (Wake Word)",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = textState,
+                    onValueChange = { textState = it },
+                    label = { Text("Mot-clé") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(24.dp))
+                Button(
+                    onClick = {
+                        _triggerWord.value = textState
+                        prefs.edit().putString("trigger_word", textState).apply()
+                        _liveTranscript.value = "Dites '${textState}'"
+                        onBack()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Sauvegarder")
+                }
             }
         }
     }
