@@ -15,11 +15,11 @@
 
 ---
 
-[![Flutter](https://img.shields.io/badge/Flutter-≥3.29-02569B?style=flat-square&logo=flutter&logoColor=white)](https://flutter.dev)
-[![Dart](https://img.shields.io/badge/Dart-≥3.0-0175C2?style=flat-square&logo=dart&logoColor=white)](https://dart.dev)
+[![Android Native](https://img.shields.io/badge/Android-Native-3DDC84?style=flat-square&logo=android&logoColor=white)](https://developer.android.com)
+[![Kotlin](https://img.shields.io/badge/Kotlin-1.9-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](https://kotlinlang.org)
+[![Jetpack Compose](https://img.shields.io/badge/Jetpack-Compose-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![License](https://img.shields.io/badge/Licence-MIT-white?style=flat-square)](LICENSE)
 
 </div>
 
@@ -27,90 +27,60 @@
 
 ## Vue d'ensemble
 
-mamAI est un assistant vocal personnel qui tourne **entièrement en local**. Vous parlez, l'IA réfléchit sur votre machine, et vous répond à voix haute.
+mamAI est un assistant vocal personnel qui tourne **entièrement en local**. Initialement développé en Flutter, le projet a migré vers une architecture **Android Native (Kotlin + Compose)** pour une stabilité et une réactivité maximale.
 
 ```
 ┌─────────────┐     mot-clé     ┌──────────────┐     HTTP/JSON     ┌─────────────────┐
-│   🎙️  Voix  │ ─────────────► │  Flutter App │ ────────────────► │  FastAPI + LLM  │
-│  (Android)  │                 │  Vosk (local)│                   │  (local Python) │
-│             │ ◄───────────── │  audio WAV   │ ◄──────────────── │  Piper TTS      │
-└─────────────┘    audio WAV    └──────────────┘    audio bytes    └─────────────────┘
+│   🎙️  Voix  │ ─────────────► │ Native App   │ ────────────────► │  FastAPI + LLM  │
+│  (Android)  │                 │ Vosk (Kotlin)│                   │  (local Python) │
+│             │ ◄───────────── │ AudioTrack   │ ◄──────────────── │  Piper TTS      │
+└─────────────┘    audio PCM    └──────────────┘    audio bytes    └─────────────────┘
 ```
 
 ---
 
-## Installation de Flutter (Méthode 100% fiable)
+## Installation (Développement Native)
 
-Si l'AUR (`yay`) vous propose des choix confus comme `flutter-artifacts-engine`, utilisez cette méthode manuelle qui fonctionne sur **Arch, Ubuntu, Fedora**, etc.
+### 1. Prérequis
+- **Android SDK** (installé dans `~/Android/Sdk`).
+- **Java 17+**.
+- **ADB** pour l'installation sur périphérique.
 
-### 1. Télécharger le SDK
-```bash
-# Créer un dossier pour vos outils
-mkdir -p ~/development
-`cd ~/development`
-
-# Télécharger Flutter (Stable)
-git clone https://github.com/flutter/flutter.git -b stable
-```
-
-### 2. Ajouter au PATH
-Ajoutez Flutter à votre PATH pour qu'il soit accessible partout.
-
-**Pour Bash ou Zsh :**
-Ajoutez ceci à la fin de votre `~/.bashrc` ou `~/.zshrc` :
-```bash
-export PATH="$PATH:$HOME/development/flutter/bin"
-```
-
-**Pour Fish :**
-Lancez cette commande :
-```fish
-fish_add_path $HOME/development/flutter/bin
-```
-
-### 3. Configurer Android
-```bash
-# Vérifier l'installation
-flutter doctor
-
-# Accepter les licences (indispensable pour l'APK)
-flutter doctor --android-licenses
-```
-
----[app-release.apk](android/app/build/outputs/apk/release/app-release.apk)
-
-## Installation du projet
-
-```bash
-git clone https://github.com/Lol163636363/mamIA.git
-cd mamIA
-
-# Récupérer les dépendances du projet
-flutter pub get
-```
+### 2. Configuration du Modèle Vosk
+Le modèle français doit être placé dans :
+`android/app/src/main/assets/model-fr/`
 
 ---
 
 ## Lancement & Build
 
 ### 1. Démarrer le backend (Serveur IA)
+Le serveur doit être configuré pour renvoyer le texte de réponse dans le header `X-Response-Text` et les octets audio (PCM 22050Hz) dans le corps de la réponse.
 ```bash
+# Exemple de lancement
 cd backend
-pip install fastapi uvicorn httpx
-uvicorn main:app --host 0.0.0.0 --port 8000
+python main.py
 ```
 
-### 2. Compiler l'APK (Android)
-Assurez-vous d'avoir bien mis le modèle Vosk dans `assets/models/vosk-model-small-fr/`.
+### 2. Compiler l'APK
+Depuis la racine du projet :
 ```bash
-flutter build apk --release --target-platform android-arm64
+cd android
+./gradlew assembleDebug
 ```
-L'APK sera généré dans : `build/app/outputs/flutter-apk/app-release.apk`
+L'APK sera généré dans : `android/app/build/outputs/apk/debug/app-debug.apk`
+
+### 3. Installation
+```bash
+adb install android/app/build/outputs/apk/debug/app-debug.apk
+```
 
 ---
 
-## Pourquoi Vosk ?
-Nous avons migré vers **Vosk** pour supprimer la limite des 10 secondes imposée par Google STT. mamIA peut maintenant vous écouter indéfiniment sans coupure, tout en restant 100 % locale.
+## Pourquoi le passage au Natif (Kotlin) ?
+- **Performance** : Suppression de la latence du bridge Flutter/Dart.
+- **Vosk Direct** : Utilisation de l'API Android native de Vosk pour une écoute continue sans faille.
+- **Stabilité** : Meilleure gestion des ressources système sur Arch Linux et Android.
 
 ---
 
