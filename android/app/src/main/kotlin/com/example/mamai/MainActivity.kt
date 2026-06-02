@@ -1,13 +1,11 @@
 package com.example.mamai
 
+import android.Manifest
 import android.content.Context
 import android.content.SharedPreferences
-import android.Manifest
 import android.content.pm.PackageManager
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioTrack
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -41,43 +39,53 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
+import org.vosk.android.RecognitionListener
 import org.vosk.android.SpeechService
 import org.vosk.android.StorageService
-import org.vosk.android.RecognitionListener
 import java.io.IOException
+import java.util.*
 import java.util.concurrent.TimeUnit
 
-class MainActivity : ComponentActivity(), RecognitionListener {
+class MainActivity : ComponentActivity(), RecognitionListener, TextToSpeech.OnInitListener {
 
     private var speechService: SpeechService? = null
     private var model: Model? = null
     private lateinit var prefs: SharedPreferences
-    
+    private var tts: TextToSpeech? = null
+    private var isTtsReady = false
+
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private val backendUrl = "http://192.168.1.50:8000/chat" 
+    // Groq Configuration
+    private val groqApiKey = "gsk_YOUR_GROQ_API_KEY" // À remplacer par l'utilisateur
+    private val groqUrl = "https://api.groq.com/openai/v1/chat/completions"
+    private val groqModel = "llama-3.3-70b-versatile"
 
     private val _liveTranscript = mutableStateOf("Initialisation...")
     private val _triggerWord = mutableStateOf("mamai")
     private val _messages = mutableStateListOf<Pair<String, Boolean>>() // Text to isUser
+    private val _isListening = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
         prefs = getSharedPreferences("mamai_prefs", Context.MODE_PRIVATE)
         _triggerWord.value = prefs.getString("trigger_word", "mamai") ?: "mamai"
+
+        tts = TextToSpeech(this, this)
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 var showSettings by remember { mutableStateOf(false) }
-                
+
                 if (showSettings) {
                     SettingsScreen(onBack = { showSettings = false })
                 } else {
@@ -108,6 +116,27 @@ class MainActivity : ComponentActivity(), RecognitionListener {
         }
     }
 
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            val result = tts?.setLanguage(Locale.FRENCH)
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                Log.e("TTS", "Langue non supportée")
+            } else {
+                isTtsReady = true
+                tts?.setPitch(1.0f)
+                tts?.setSpeechRate(1.0f)
+            }
+        } else {
+            Log.e("TTS", "Initialisation échouée")
+        }
+    }
+
+    private fun speak(text: String) {
+        if (isTtsReady) {
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "mamai_tts")
+        }
+    }
+
     private fun initVosk() {
         _liveTranscript.value = "Chargement du modèle..."
         StorageService.unpack(this, "model-fr", "model",
@@ -116,9 +145,9 @@ class MainActivity : ComponentActivity(), RecognitionListener {
                 _liveTranscript.value = "Dites '${_triggerWord.value}'"
                 startRecognition()
             },
-            { e: IOException -> 
+            { e: IOException ->
                 Log.e("VOSK", "Erreur décompression: ${e.message}")
-                _liveTranscript.value = "Erreur modèle: ${e.message}" 
+                _liveTranscript.value = "Erreur modèle: ${e.message}"
             }
         )
     }
@@ -128,6 +157,7 @@ class MainActivity : ComponentActivity(), RecognitionListener {
             val rec = Recognizer(model, 16000.0f)
             speechService = SpeechService(rec, 16000.0f)
             speechService?.startListening(this)
+            _isListening.value = true
         } catch (e: Exception) {
             Log.e("VOSK", "Erreur startListening: ${e.message}")
             _liveTranscript.value = "Erreur micro: ${e.message}"
@@ -148,7 +178,7 @@ class MainActivity : ComponentActivity(), RecognitionListener {
         val text = extractText(hypothesis, "text")
         if (text.isNotEmpty()) {
             _messages.add(text to true)
-            sendToBackend(text)
+            sendToGroq(text)
         }
     }
 
@@ -159,65 +189,82 @@ class MainActivity : ComponentActivity(), RecognitionListener {
         } catch (e: Exception) { "" }
     }
 
-    private fun sendToBackend(text: String) {
+    private fun sendToGroq(text: String) {
         lifecycleScope.launch {
             _liveTranscript.value = "Réflexion..."
+            _isListening.value = false
+            speechService?.stop()
+
             try {
-                val json = JSONObject().apply { put("text", text) }
+                val json = JSONObject().apply {
+                    put("model", groqModel)
+                    put("messages", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "system")
+                            put("content", "Tu es mamIA, un assistant personnel bienveillant et efficace. Réponds de manière concise en français.")
+                        })
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("content", text)
+                        })
+                    })
+                    put("temperature", 0.7)
+                }
+
                 val body = json.toString().toRequestBody("application/json".toMediaType())
-                val request = Request.Builder().url(backendUrl).post(body).build()
-                
+                val request = Request.Builder()
+                    .url(groqUrl)
+                    .addHeader("Authorization", "Bearer $groqApiKey")
+                    .post(body)
+                    .build()
+
                 withContext(Dispatchers.IO) {
                     client.newCall(request).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            val audioBytes = resp.body?.bytes()
-                            val responseHeader = resp.header("X-Response-Text") ?: "Message reçu"
-                            
+                        val responseBody = resp.body?.string()
+                        if (resp.isSuccessful && responseBody != null) {
+                            val jsonResp = JSONObject(responseBody)
+                            val aiText = jsonResp.getJSONArray("choices")
+                                .getJSONObject(0)
+                                .getJSONObject("message")
+                                .getString("content")
+
                             withContext(Dispatchers.Main) {
-                                _messages.add(responseHeader to false)
-                                _liveTranscript.value = "Dites '${_triggerWord.value}'"
-                                if (audioBytes != null) {
-                                    playAudio(audioBytes)
-                                }
+                                _messages.add(aiText to false)
+                                _liveTranscript.value = "mamIA parle..."
+                                speak(aiText)
+                                startRecognition()
                             }
                         } else {
                             withContext(Dispatchers.Main) {
-                                _messages.add("Erreur serveur: ${resp.code}" to false)
-                                _liveTranscript.value = "Dites '${_triggerWord.value}'"
+                                _messages.add("Erreur Groq: ${resp.code}" to false)
+                                startRecognition()
                             }
                         }
                     }
                 }
             } catch (e: Exception) {
-                _messages.add("Erreur connexion: ${e.message}" to false)
-                _liveTranscript.value = "Dites '${_triggerWord.value}'"
+                withContext(Dispatchers.Main) {
+                    _messages.add("Erreur: ${e.message}" to false)
+                    startRecognition()
+                }
             }
         }
     }
 
-    private fun playAudio(audioBytes: ByteArray) {
-        try {
-            val minBufferSize = AudioTrack.getMinBufferSize(22050, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-            val audioTrack = AudioTrack.Builder()
-                .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(22050).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                .setBufferSizeInBytes(Math.max(audioBytes.size, minBufferSize))
-                .setTransferMode(AudioTrack.MODE_STATIC)
-                .build()
-
-            audioTrack.write(audioBytes, 0, audioBytes.size)
-            audioTrack.play()
-        } catch (e: Exception) {
-            Log.e("TTS", "Erreur lecture audio: ${e.message}")
-        }
-    }
-
     override fun onFinalResult(hypothesis: String) {}
-    override fun onError(exception: Exception) { 
+    override fun onError(exception: Exception) {
         Log.e("VOSK", "Erreur RecognitionListener: ${exception.message}")
-        _liveTranscript.value = "Erreur: ${exception.message}" 
+        _liveTranscript.value = "Erreur: ${exception.message}"
     }
     override fun onTimeout() {}
+
+    override fun onDestroy() {
+        super.onDestroy()
+        speechService?.stop()
+        speechService?.shutdown()
+        tts?.stop()
+        tts?.shutdown()
+    }
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
@@ -321,6 +368,7 @@ class MainActivity : ComponentActivity(), RecognitionListener {
 
     @Composable
     fun StatusArea() {
+        val color = if (_isListening.value) Color(0xFF00D4FF) else Color.Gray
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -333,10 +381,10 @@ class MainActivity : ComponentActivity(), RecognitionListener {
                 modifier = Modifier
                     .size(60.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF00D4FF).copy(alpha = 0.2f)),
+                    .background(color.copy(alpha = 0.2f)),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.Mic, contentDescription = null, tint = Color(0xFF00D4FF), modifier = Modifier.size(30.dp))
+                Icon(Icons.Default.Mic, contentDescription = null, tint = color, modifier = Modifier.size(30.dp))
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(_liveTranscript.value, color = Color.White.copy(alpha = 0.7f), fontSize = 16.sp)

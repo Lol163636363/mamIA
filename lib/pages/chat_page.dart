@@ -1,15 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:vosk_flutter/vosk_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'setup_page.dart';
 
-const String _apiUrl = 'https://TON-TUNNEL.trycloudflare.com/chat';
+// Configuration "Backend" intégrée
+const String _groqApiKey = 'gsk_YOUR_GROQ_API_KEY'; // METS TA CLÉ ICI
+const String _groqModel = 'llama-3.3-70b-versatile';
 
 enum Sender { user, ai }
 
@@ -38,7 +39,7 @@ class ChatPage extends StatefulWidget {
 
 class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   final List<ChatMessage> _messages = [];
-  final AudioPlayer _player = AudioPlayer();
+  final FlutterTts _flutterTts = FlutterTts();
   final ScrollController _scrollController = ScrollController();
 
   final VoskFlutterPlugin _vosk = VoskFlutterPlugin.instance();
@@ -64,13 +65,20 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       CurvedAnimation(parent: _orb, curve: Curves.easeInOut),
     );
 
-    _player.onPlayerComplete.listen((_) {
+    _initTts();
+    _initVosk();
+  }
+
+  Future<void> _initTts() async {
+    await _flutterTts.setLanguage("fr-FR");
+    await _flutterTts.setPitch(1.0);
+    await _flutterTts.setSpeechRate(0.5);
+    
+    _flutterTts.setCompletionHandler(() {
       if (mounted) {
         _startListening();
       }
     });
-
-    _initVosk();
   }
 
   Future<void> _initVosk() async {
@@ -112,7 +120,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         if (_state == ListenState.wakeWord && result.isNotEmpty) {
           _sendMessage(result);
         } else if (_state == ListenState.wakeWord && result.isEmpty) {
-          // Si on attendait une commande mais qu'on n'a rien reçu, on repasse en idle
           setState(() => _state = ListenState.idle);
         }
       });
@@ -134,8 +141,36 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     });
   }
 
+  Future<String?> _getGroqResponse(String text) async {
+    try {
+      final response = await http.post(
+        Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
+        headers: {
+          'Authorization': 'Bearer $_groqApiKey',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'model': _groqModel,
+          'messages': [
+            {'role': 'system', 'content': 'Tu es mamIA, un assistant personnel bienveillant et efficace. Réponds de manière concise en français.'},
+            {'role': 'user', 'content': text},
+          ],
+          'temperature': 0.7,
+        }),
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(utf8.decode(response.bodyBytes));
+        return data['choices'][0]['message']['content'];
+      }
+    } catch (e) {
+      debugPrint('Erreur Groq: $e');
+    }
+    return null;
+  }
+
   Future<void> _sendMessage(String texte) async {
-    await _speechService?.stop(); // On arrête d'écouter pendant que l'IA réfléchit/parle
+    await _speechService?.stop();
 
     setState(() {
       _state = ListenState.loading;
@@ -144,28 +179,22 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     });
     _scrollToBottom();
 
-    try {
-      final response = await http.post(
-        Uri.parse(_apiUrl),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'texte': texte}),
-      ).timeout(const Duration(seconds: 15));
+    final iaText = await _getGroqResponse(texte);
 
-      if (response.statusCode == 200) {
-        final iaText = Uri.decodeComponent(response.headers['x-ia-reponse'] ?? '...');
-        final Uint8List audioBytes = response.bodyBytes;
-
-        setState(() {
-          _state = ListenState.playing;
-          _liveTranscript = 'mamIA parle...';
-          _messages.add(ChatMessage(text: iaText, sender: Sender.ai));
-        });
-        _scrollToBottom();
-        await _player.play(BytesSource(audioBytes));
-      } else {
-        _startListening();
-      }
-    } catch (e) {
+    if (iaText != null) {
+      setState(() {
+        _state = ListenState.playing;
+        _liveTranscript = 'mamIA parle...';
+        _messages.add(ChatMessage(text: iaText, sender: Sender.ai));
+      });
+      _scrollToBottom();
+      await _flutterTts.speak(iaText);
+    } else {
+      setState(() {
+        _state = ListenState.error;
+        _errorMessage = "Désolé, je n'ai pas pu contacter mon cerveau.";
+      });
+      await Future.delayed(const Duration(seconds: 2));
       _startListening();
     }
   }
@@ -193,7 +222,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   @override
   void dispose() {
     _speechService?.stop();
-    _player.dispose();
+    _flutterTts.stop();
     _orb.dispose();
     _scrollController.dispose();
     super.dispose();
