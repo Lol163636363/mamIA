@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+     mamIA uses Theme.AppCompat.Light.NoActionBar as declared in AndroidManifest.xml.
+      We don't override it here; the AppCompat library provides the definition.
+      This file exists to satisfy resource resolution for the Compose preview tooling.
+    -->
+    <style name="Theme.mamAI" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

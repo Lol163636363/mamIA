@@ -1,0 +1,181 @@
+name: Build & Release APK
+
+# Triggers:
+#   1. Push a tag like `v1.0.3` -> builds + creates a release on that tag.
+#   2. Manual run from the Actions tab (workflow_dispatch) -> provide a tag name,
+#      the workflow will create the tag (if missing) and publish the release.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag/version to release (e.g. v1.0.3). Will be created if missing.'
+        required: true
+        default: 'v1.0.3'
+
+# `contents: write` is required by softprops/action-gh-release to create the
+# release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build APK & publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          # Strip a leading "v" to derive versionName (e.g. v1.0.3 -> 1.0.3)
+          VERSION_NAME="${TAG#v}"
+          echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG version_name=$VERSION_NAME"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools build-tools;34.0.0 platforms;android-34'
+
+      - name: Inject version into build.gradle.kts
+        run: |
+          # Make the APK's versionName match the tag, and bump versionCode monotonically
+          # (count of tags so far + 1, fallback to git rev-list count).
+          if git rev-list --count --tags > /dev/null 2>&1; then
+            VC=$(git rev-list --count --tags)
+            [ -z "$VC" ] || [ "$VC" = "0" ] && VC=1
+          else
+            VC=1
+          fi
+          sed -i \
+            -e "s/versionCode = [0-9]*/versionCode = $VC/" \
+            -e "s|versionName = \"[^\"]*\"|versionName = \"${{ steps.tag.outputs.version_name }}\"|" \
+            app/build.gradle.kts
+          echo "=== Patched app/build.gradle.kts ==="
+          grep -E "versionCode|versionName" app/build.gradle.kts
+
+      - name: Download Vosk FR small model (~40 MB)
+        run: |
+          mkdir -p app/src/main/assets/model-fr
+          # Wipe any stale files (CI cache might leave stuff), but keep `uuid` if present
+          find app/src/main/assets/model-fr -mindepth 1 ! -name uuid -delete 2>/dev/null || true
+          curl -fsSL -o /tmp/vosk-fr.zip "https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip"
+          unzip -q /tmp/vosk-fr.zip -d /tmp
+          cp -r /tmp/vosk-model-small-fr-0.22/* app/src/main/assets/model-fr/
+          rm -rf /tmp/vosk-fr.zip /tmp/vosk-model-small-fr-0.22
+          echo "=== model-fr contents ==="
+          ls -la app/src/main/assets/model-fr/
+
+      - name: Ensure uuid marker exists
+        run: |
+          if [ ! -f app/src/main/assets/model-fr/uuid ]; then
+            python3 -c "import uuid; print(uuid.uuid4())" > app/src/main/assets/model-fr/uuid
+          fi
+          echo "uuid content: $(cat app/src/main/assets/model-fr/uuid)"
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon --console=plain --stacktrace
+
+      - name: Verify APK
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+          ls -lh "$APK_PATH"
+          # Badging sanity check
+          ${ANDROID_SDK_ROOT}/build-tools/34.0.0/aapt2 dump badging "$APK_PATH" | head -3
+
+      - name: Rename APK to mamIA-<tag>-debug.apk
+        run: |
+          cp "$APK_PATH" "mamIA-${{ steps.tag.outputs.tag }}-debug.apk"
+          ls -lh "mamIA-${{ steps.tag.outputs.tag }}-debug.apk"
+
+      - name: Build release notes
+        id: notes
+        run: |
+          COMMIT_SHA=${{ github.sha }}
+          COMMIT_SHORT=${COMMIT_SHA:0:7}
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+          cat > /tmp/release_notes.md << EOF
+          # mamIA ${{ steps.tag.outputs.tag }}
+
+          **Build automatique via GitHub Actions** depuis le commit [\`${COMMIT_SHORT}\`](${{ github.server_url }}/${{ github.repository }}/commit/${COMMIT_SHA }).
+
+          > Commit message: \`${COMMIT_MSG}\`
+
+          ---
+
+          ## 📦 Asset
+
+          - **\`mamIA-${{ steps.tag.outputs.tag }}-debug.apk\`** — APK debug signé avec le keystore Android Debug.
+            - Package : \`com.example.mamai\`
+            - versionName : \`${{ steps.tag.outputs.version_name }}\`
+            - minSdk : 21 / targetSdk : 34
+            - Modèle Vosk FR small (~40 MB) embarqué hors-ligne + fichier \`uuid\`
+            - ⚠️ Build \`debuggable=true\`. Ne pas distribuer publiquement en l'état.
+
+          ## 🔧 Build details
+
+          - **OS** : \`ubuntu-latest\`
+          - **JDK** : Temurin 21
+          - **Android SDK** : build-tools 34.0.0, platform android-34
+          - **Gradle** : 8.5 + AGP 8.2.2 + Kotlin 1.9.22
+          - **Modèle STT** : vosk-model-small-fr-0.22 (téléchargé à la volée)
+
+          ## 🔑 Permissions requises
+
+          - \`INTERNET\` — appels à l'API Groq
+          - \`RECORD_AUDIO\` — reconnaissance vocale Vosk
+          - \`READ_CALENDAR\` / \`WRITE_CALENDAR\` — gestion de l'agenda local
+          - \`BLUETOOTH*\` — support casques audio
+
+          ## 📝 Pour installer
+
+          \`\`\`bash
+          adb install -r mamIA-${{ steps.tag.outputs.tag }}-debug.apk
+          \`\`\`
+          EOF
+          echo "notes_path=/tmp/release_notes.md" >> "$GITHUB_ENV"
+
+      - name: Create (or update) GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: mamIA ${{ steps.tag.outputs.tag }} — APK debug (auto-build)
+          body_path: /tmp/release_notes.md
+          files: mamIA-${{ steps.tag.outputs.tag }}-debug.apk
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,14 +1,22 @@
-gradle-wrapper.jar
 /.gradle
 /captures/
-/gradlew
-/gradlew.bat
 /local.properties
 GeneratedPluginRegistrant.java
 .cxx/
 
+# Build outputs
+/build/
+/app/build/
+
+# Vosk model binary assets (~40 MB) — downloaded by CI workflow at build time.
+# The `uuid` marker file IS committed (small, used by Vosk StorageService.unpack).
+/app/src/main/assets/model-fr/*
+!/app/src/main/assets/model-fr/uuid
+
 # Remember to never publicly share your keystore.
-# See https://flutter.dev/to/reference-keystore
 key.properties
 **/*.keystore
 **/*.jks
+
+# IDE
+/.idea/
