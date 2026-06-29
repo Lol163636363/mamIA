@@ -121,50 +121,63 @@ jobs:
           ls -lh "mamIA-${{ steps.tag.outputs.tag }}-debug.apk"
 
       - name: Build release notes
-        id: notes
         run: |
-          COMMIT_SHA=${{ github.sha }}
-          COMMIT_SHORT=${COMMIT_SHA:0:7}
-          COMMIT_MSG=$(git log -1 --pretty=%s)
-          cat > /tmp/release_notes.md << EOF
-          # mamIA ${{ steps.tag.outputs.tag }}
+          python3 - <<'PYEOF'
+          import subprocess
 
-          **Build automatique via GitHub Actions** depuis le commit [\`${COMMIT_SHORT}\`](${{ github.server_url }}/${{ github.repository }}/commit/${COMMIT_SHA }).
+          TAG = "${{ steps.tag.outputs.tag }}"
+          VERSION_NAME = "${{ steps.tag.outputs.version_name }}"
+          COMMIT_SHA = "${{ github.sha }}"
+          COMMIT_SHORT = COMMIT_SHA[:7]
+          COMMIT_MSG = subprocess.check_output(
+              ["git", "log", "-1", "--pretty=%s"], text=True
+          ).strip()
+          SERVER_URL = "${{ github.server_url }}"
+          REPOSITORY = "${{ github.repository }}"
 
-          > Commit message: \`${COMMIT_MSG}\`
+          notes = f"""# mamIA {TAG}
+
+          **Build automatique via GitHub Actions** depuis le commit [`{COMMIT_SHORT}`]({SERVER_URL}/{REPOSITORY}/commit/{COMMIT_SHA}).
+
+          > Commit message: `{COMMIT_MSG}`
 
           ---
 
-          ## 📦 Asset
+          ## Package asset
 
-          - **\`mamIA-${{ steps.tag.outputs.tag }}-debug.apk\`** — APK debug signé avec le keystore Android Debug.
-            - Package : \`com.example.mamai\`
-            - versionName : \`${{ steps.tag.outputs.version_name }}\`
+          - **`mamIA-{TAG}-debug.apk`** — APK debug signe avec le keystore Android Debug.
+            - Package : `com.example.mamai`
+            - versionName : `{VERSION_NAME}`
             - minSdk : 21 / targetSdk : 34
-            - Modèle Vosk FR small (~40 MB) embarqué hors-ligne + fichier \`uuid\`
-            - ⚠️ Build \`debuggable=true\`. Ne pas distribuer publiquement en l'état.
+            - Modele Vosk FR small (~40 MB) embarque hors-ligne + fichier `uuid`
+            - Build `debuggable=true`. Ne pas distribuer publiquement en l'etat.
 
-          ## 🔧 Build details
+          ## Build details
 
-          - **OS** : \`ubuntu-latest\`
+          - **OS** : `ubuntu-latest`
           - **JDK** : Temurin 21
           - **Android SDK** : build-tools 34.0.0, platform android-34
           - **Gradle** : 8.5 + AGP 8.2.2 + Kotlin 1.9.22
-          - **Modèle STT** : vosk-model-small-fr-0.22 (téléchargé à la volée)
+          - **Modele STT** : vosk-model-small-fr-0.22 (telecharge a la volee)
 
-          ## 🔑 Permissions requises
+          ## Permissions requises
 
-          - \`INTERNET\` — appels à l'API Groq
-          - \`RECORD_AUDIO\` — reconnaissance vocale Vosk
-          - \`READ_CALENDAR\` / \`WRITE_CALENDAR\` — gestion de l'agenda local
-          - \`BLUETOOTH*\` — support casques audio
+          - `INTERNET` — appels a l'API Groq
+          - `RECORD_AUDIO` — reconnaissance vocale Vosk
+          - `READ_CALENDAR` / `WRITE_CALENDAR` — gestion de l'agenda local
+          - `BLUETOOTH*` — support casques audio
 
-          ## 📝 Pour installer
+          ## Pour installer
 
-          \`\`\`bash
-          adb install -r mamIA-${{ steps.tag.outputs.tag }}-debug.apk
-          \`\`\`
-          EOF
+          ```bash
+          adb install -r mamIA-{TAG}-debug.apk
+          ```
+          """
+
+          with open("/tmp/release_notes.md", "w", encoding="utf-8") as f:
+              f.write(notes)
+          print("Release notes written to /tmp/release_notes.md")
+          PYEOF
           echo "notes_path=/tmp/release_notes.md" >> "$GITHUB_ENV"
 
       - name: Create (or update) GitHub release
