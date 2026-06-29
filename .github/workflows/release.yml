@@ -123,25 +123,42 @@ jobs:
 
       - name: Sanity check — Groq key was injected (not the placeholder)
         run: |
-          APK_PATH="$APK_PATH"
-          # Extract every classes*.dex and look for the placeholder string. If found
-          # in ANY of them, the secret was NOT injected — fail the build.
-          # (We scan all dex files, not just classes.dex, because BuildConfig may
-          # land in classes2.dex / classes3.dex / etc. after multidexing.)
-          mkdir -p /tmp/dex_check && cd /tmp/dex_check
-          unzip -o "$APK_PATH" 'classes*.dex' > /dev/null
-          FOUND=0
+          # Convert APK_PATH to absolute (we'll cd into a workdir below).
+          APK_ABS="$(readlink -f "$APK_PATH")"
+          if [ ! -f "$APK_ABS" ]; then
+            echo "::error::APK introuvable à $APK_ABS"
+            exit 1
+          fi
+          echo "APK abs path: $APK_ABS"
+
+          # Extract every classes*.dex into a clean workdir, then scan them.
+          WORKDIR="$(mktemp -d)"
+          cd "$WORKDIR"
+          unzip -o "$APK_ABS" 'classes*.dex' > /dev/null
+
+          FOUND_PLACEHOLDER=0
+          FOUND_KEY=0
           for f in classes*.dex; do
             if grep -aq "VOTRE_CLE_API_GROQ" "$f"; then
               echo "::error::Placeholder 'VOTRE_CLE_API_GROQ' trouvé dans $f — le secret GitHub n'a pas été injecté."
-              FOUND=1
+              FOUND_PLACEHOLDER=1
+            fi
+            if grep -aq "gsk_" "$f"; then
+              FOUND_KEY=1
             fi
           done
-          if [ "$FOUND" = "1" ]; then
+
+          if [ "$FOUND_PLACEHOLDER" = "1" ]; then
             echo "::error::Vérifie : (1) le secret VOTRE_CLE_API_GROQ existe dans Settings → Secrets and variables → Actions ; (2) la propriété Gradle -PgroqApiKey est bien passée au build."
             exit 1
           fi
-          echo "OK — placeholder absent de tous les .dex (clé Groq bien injectée)."
+
+          if [ "$FOUND_KEY" = "0" ]; then
+            echo "::error::Ni le placeholder ni la clé 'gsk_...' n'ont été trouvés dans l'APK — BuildConfig n'a pas été inclus ?"
+            exit 1
+          fi
+
+          echo "OK — placeholder absent de tous les .dex ET préfixe 'gsk_' trouvé (clé Groq bien injectée)."
 
       - name: Rename APK to mamIA-<tag>-debug.apk
         run: |
