@@ -107,9 +107,11 @@ jobs:
       - name: Build debug APK
         env:
           # Secret GitHub "VOTRE_CLE_API_GROQ" injecté dans BuildConfig.GROQ_API_KEY
-          # via la propriété Gradle -PgGroqApiKey=...
+          # via la propriété Gradle -PgroqApiKey=... (attention : -P est immédiatement
+          # suivi du nom de propriété, donc -PgroqApiKey crée la propriété "groqApiKey",
+          # LUE par project.findProperty("groqApiKey") dans app/build.gradle.kts).
           GROQ_API_KEY: ${{ secrets.VOTRE_CLE_API_GROQ }}
-        run: ./gradlew :app:assembleDebug --no-daemon --console=plain --stacktrace -PgGroqApiKey="$GROQ_API_KEY"
+        run: ./gradlew :app:assembleDebug --no-daemon --console=plain --stacktrace -PgroqApiKey="$GROQ_API_KEY"
 
       - name: Verify APK
         run: |
@@ -122,13 +124,24 @@ jobs:
       - name: Sanity check — Groq key was injected (not the placeholder)
         run: |
           APK_PATH="$APK_PATH"
-          # Extract classes.dex and look for the placeholder string. If found,
-          # the secret was NOT injected — fail the build.
-          if unzip -p "$APK_PATH" classes.dex | strings | grep -q "VOTRE_CLE_API_GROQ"; then
-            echo "::error::Le secret VOTRE_CLE_API_GROQ n'a pas été injecté dans l'APK. Vérifie Settings → Secrets and variables → Actions → VOTRE_CLE_API_GROQ."
+          # Extract every classes*.dex and look for the placeholder string. If found
+          # in ANY of them, the secret was NOT injected — fail the build.
+          # (We scan all dex files, not just classes.dex, because BuildConfig may
+          # land in classes2.dex / classes3.dex / etc. after multidexing.)
+          mkdir -p /tmp/dex_check && cd /tmp/dex_check
+          unzip -o "$APK_PATH" 'classes*.dex' > /dev/null
+          FOUND=0
+          for f in classes*.dex; do
+            if grep -aq "VOTRE_CLE_API_GROQ" "$f"; then
+              echo "::error::Placeholder 'VOTRE_CLE_API_GROQ' trouvé dans $f — le secret GitHub n'a pas été injecté."
+              FOUND=1
+            fi
+          done
+          if [ "$FOUND" = "1" ]; then
+            echo "::error::Vérifie : (1) le secret VOTRE_CLE_API_GROQ existe dans Settings → Secrets and variables → Actions ; (2) la propriété Gradle -PgroqApiKey est bien passée au build."
             exit 1
           fi
-          echo "OK — clé Groq injectée (placeholder absent de l'APK)."
+          echo "OK — placeholder absent de tous les .dex (clé Groq bien injectée)."
 
       - name: Rename APK to mamIA-<tag>-debug.apk
         run: |
