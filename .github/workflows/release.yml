@@ -105,7 +105,11 @@ jobs:
           restore-keys: gradle-${{ runner.os }}-
 
       - name: Build debug APK
-        run: ./gradlew :app:assembleDebug --no-daemon --console=plain --stacktrace
+        env:
+          # Secret GitHub "VOTRE_CLE_API_GROQ" injecté dans BuildConfig.GROQ_API_KEY
+          # via la propriété Gradle -PgGroqApiKey=...
+          GROQ_API_KEY: ${{ secrets.VOTRE_CLE_API_GROQ }}
+        run: ./gradlew :app:assembleDebug --no-daemon --console=plain --stacktrace -PgGroqApiKey="$GROQ_API_KEY"
 
       - name: Verify APK
         run: |
@@ -114,6 +118,17 @@ jobs:
           ls -lh "$APK_PATH"
           # Badging sanity check
           ${ANDROID_SDK_ROOT}/build-tools/34.0.0/aapt2 dump badging "$APK_PATH" | head -3
+
+      - name: Sanity check — Groq key was injected (not the placeholder)
+        run: |
+          APK_PATH="$APK_PATH"
+          # Extract classes.dex and look for the placeholder string. If found,
+          # the secret was NOT injected — fail the build.
+          if unzip -p "$APK_PATH" classes.dex | strings | grep -q "VOTRE_CLE_API_GROQ"; then
+            echo "::error::Le secret VOTRE_CLE_API_GROQ n'a pas été injecté dans l'APK. Vérifie Settings → Secrets and variables → Actions → VOTRE_CLE_API_GROQ."
+            exit 1
+          fi
+          echo "OK — clé Groq injectée (placeholder absent de l'APK)."
 
       - name: Rename APK to mamIA-<tag>-debug.apk
         run: |

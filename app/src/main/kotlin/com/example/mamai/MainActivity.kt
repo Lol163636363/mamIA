@@ -62,8 +62,9 @@ class MainActivity : ComponentActivity(), RecognitionListener, TextToSpeech.OnIn
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    // REMPLACER AVEC VOTRE CLÉ API GROQ
-    private val groqApiKey = "VOTRE_CLE_API_GROQ"
+    // Clé API Groq injectée au build via BuildConfig.GROQ_API_KEY
+    // (définie par -PgGroqApiKey=... dans la commande Gradle).
+    private val groqApiKey = BuildConfig.GROQ_API_KEY
     private val groqApiUrl = "https://api.groq.com/openai/v1/chat/completions"
 
     private val _liveTranscript = mutableStateOf("Initialisation...")
@@ -199,8 +200,8 @@ class MainActivity : ComponentActivity(), RecognitionListener, TextToSpeech.OnIn
     }
 
     private fun sendToGroq(text: String): String {
-        if (groqApiKey == "VOTRE_CLE_API_GROQ") {
-            return "Veuillez configurer votre clé API Groq dans MainActivity.kt."
+        if (groqApiKey.isBlank() || groqApiKey == "VOTRE_CLE_API_GROQ") {
+            return "Clé API Groq manquante — définissez le secret VOTRE_CLE_API_GROQ sur GitHub puis relancez le build."
         }
         try {
             val json = JSONObject().apply {

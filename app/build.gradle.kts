@@ -18,6 +18,10 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // Clé API Groq injectée via -PgGroqApiKey=... (depuis le secret GitHub
+        // VOTRE_CLE_API_GROQ dans le workflow). Vide par défaut pour les builds locaux.
+        buildConfigField("String", "GROQ_API_KEY", "\"${project.findProperty("groqApiKey") ?: "VOTRE_CLE_API_GROQ"}\"")
     }
 
     buildTypes {
@@ -35,6 +39,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.8"
