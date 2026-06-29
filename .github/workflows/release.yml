@@ -121,7 +121,7 @@ jobs:
           # Badging sanity check
           ${ANDROID_SDK_ROOT}/build-tools/34.0.0/aapt2 dump badging "$APK_PATH" | head -3
 
-      - name: Sanity check — Groq key was injected (not the placeholder)
+      - name: Sanity check — Groq key was injected (gsk_ prefix present in APK)
         run: |
           # Convert APK_PATH to absolute (we'll cd into a workdir below).
           APK_ABS="$(readlink -f "$APK_PATH")"
@@ -132,33 +132,29 @@ jobs:
           echo "APK abs path: $APK_ABS"
 
           # Extract every classes*.dex into a clean workdir, then scan them.
+          # NOTE: le placeholder 'VOTRE_CLE_API_GROQ' est légitimement présent dans
+          # le code source (MainActivity.kt l'utilise pour la comparaison de
+          # fallback et dans le message d'erreur), donc on ne peut PAS vérifier
+          # son absence. À la place, on vérifie la présence du préfixe 'gsk_'
+          # qui n'apparaît QUE si la vraie clé a été injectée via BuildConfig.
           WORKDIR="$(mktemp -d)"
           cd "$WORKDIR"
           unzip -o "$APK_ABS" 'classes*.dex' > /dev/null
 
-          FOUND_PLACEHOLDER=0
           FOUND_KEY=0
           for f in classes*.dex; do
-            if grep -aq "VOTRE_CLE_API_GROQ" "$f"; then
-              echo "::error::Placeholder 'VOTRE_CLE_API_GROQ' trouvé dans $f — le secret GitHub n'a pas été injecté."
-              FOUND_PLACEHOLDER=1
-            fi
             if grep -aq "gsk_" "$f"; then
               FOUND_KEY=1
+              echo "  → préfixe 'gsk_' trouvé dans $f"
             fi
           done
 
-          if [ "$FOUND_PLACEHOLDER" = "1" ]; then
-            echo "::error::Vérifie : (1) le secret VOTRE_CLE_API_GROQ existe dans Settings → Secrets and variables → Actions ; (2) la propriété Gradle -PgroqApiKey est bien passée au build."
-            exit 1
-          fi
-
           if [ "$FOUND_KEY" = "0" ]; then
-            echo "::error::Ni le placeholder ni la clé 'gsk_...' n'ont été trouvés dans l'APK — BuildConfig n'a pas été inclus ?"
+            echo "::error::Le préfixe 'gsk_' n'a pas été trouvé dans l'APK — la clé Groq n'a pas été injectée. Vérifie : (1) le secret VOTRE_CLE_API_GROQ existe dans Settings → Secrets and variables → Actions ; (2) la propriété Gradle -PgroqApiKey est bien passée au build."
             exit 1
           fi
 
-          echo "OK — placeholder absent de tous les .dex ET préfixe 'gsk_' trouvé (clé Groq bien injectée)."
+          echo "OK — préfixe 'gsk_' trouvé dans l'APK (clé Groq bien injectée via BuildConfig)."
 
       - name: Rename APK to mamIA-<tag>-debug.apk
         run: |
